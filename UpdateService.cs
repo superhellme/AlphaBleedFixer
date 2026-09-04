@@ -2,11 +2,8 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
-using System.Linq;
 using System.Net;
 using System.Reflection;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -22,7 +19,9 @@ namespace AlphaBleedFixer
 
     internal static class UpdateService
     {
-        private const string LatestReleaseApiUrl = "https://api.github.com/repos/superhellme/AlphaBleedFixer/releases/latest";
+        private const string LatestReleasePageUrl = "https://github.com/superhellme/AlphaBleedFixer/releases/latest";
+        private const string ReleaseTagPathPrefix = "/superhellme/AlphaBleedFixer/releases/tag/";
+        private const string ReleaseDownloadBaseUrl = "https://github.com/superhellme/AlphaBleedFixer/releases/download/";
         private const string ReleaseAssetName = "AlphaBleedFixer.zip";
         private const string UserAgent = "AlphaBleedFixer-Updater";
         private const string SettingsFileName = "AlphaBleedFixer.ini";
@@ -40,50 +39,58 @@ namespace AlphaBleedFixer
         public static async Task<AvailableUpdate> FindUpdateAsync()
         {
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-            string json;
-            using (var client = CreateWebClient())
+            var request = (HttpWebRequest)WebRequest.Create(LatestReleasePageUrl);
+            request.Method = "HEAD";
+            request.AllowAutoRedirect = false;
+            request.UserAgent = UserAgent;
+            request.Timeout = 15000;
+
+            Uri releaseUri;
+            var responseTask = request.GetResponseAsync();
+            if (await Task.WhenAny(responseTask, Task.Delay(15000)) != responseTask)
             {
-                json = await client.DownloadStringTaskAsync(new Uri(LatestReleaseApiUrl));
+                request.Abort();
+                throw new TimeoutException("GitHubの更新確認がタイムアウトしました。");
             }
 
-            GitHubRelease release;
-            var serializer = new DataContractJsonSerializer(typeof(GitHubRelease));
-            using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(json)))
+            using (var response = (HttpWebResponse)await responseTask)
             {
-                release = (GitHubRelease)serializer.ReadObject(stream);
+                var statusCode = (int)response.StatusCode;
+                if (statusCode < 300 || statusCode >= 400 || string.IsNullOrWhiteSpace(response.Headers[HttpResponseHeader.Location]))
+                {
+                    throw new InvalidDataException("GitHubから最新リリースの場所を取得できませんでした。");
+                }
+                releaseUri = new Uri(new Uri(LatestReleasePageUrl), response.Headers[HttpResponseHeader.Location]);
             }
-            if (release == null || release.draft || release.prerelease || string.IsNullOrWhiteSpace(release.tag_name))
+
+            if (!string.Equals(releaseUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(releaseUri.Host, "github.com", StringComparison.OrdinalIgnoreCase)
+                || !releaseUri.AbsolutePath.StartsWith(ReleaseTagPathPrefix, StringComparison.OrdinalIgnoreCase))
             {
-                return null;
+                throw new InvalidDataException("GitHubから不正なリリースURLが返されました。");
+            }
+
+            var tag = Uri.UnescapeDataString(releaseUri.AbsolutePath.Substring(ReleaseTagPathPrefix.Length));
+            if (string.IsNullOrWhiteSpace(tag) || tag.IndexOf('/') >= 0)
+            {
+                throw new InvalidDataException("最新リリースのタグを取得できませんでした。");
             }
 
             Version latestVersion;
-            var versionText = release.tag_name.Trim().TrimStart('v', 'V');
+            var versionText = tag.Trim().TrimStart('v', 'V');
             if (!Version.TryParse(versionText, out latestVersion) || latestVersion <= CurrentVersion)
             {
                 return null;
             }
 
-            var asset = (release.assets ?? new GitHubAsset[0])
-                .FirstOrDefault(candidate => string.Equals(candidate.name, ReleaseAssetName, StringComparison.OrdinalIgnoreCase));
-            if (asset == null || string.IsNullOrWhiteSpace(asset.browser_download_url))
-            {
-                throw new InvalidDataException("リリースに " + ReleaseAssetName + " がありません。");
-            }
-
-            var downloadUri = new Uri(asset.browser_download_url);
-            if (!string.Equals(downloadUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(downloadUri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException("アップデートのダウンロード先が不正です。");
-            }
+            var downloadUrl = ReleaseDownloadBaseUrl + Uri.EscapeDataString(tag) + "/" + ReleaseAssetName;
 
             return new AvailableUpdate
             {
                 Version = latestVersion,
                 VersionLabel = "v" + latestVersion.ToString(3),
-                DownloadUrl = asset.browser_download_url,
-                ReleasePageUrl = release.html_url
+                DownloadUrl = downloadUrl,
+                ReleasePageUrl = releaseUri.AbsoluteUri
             };
         }
 
@@ -147,7 +154,6 @@ namespace AlphaBleedFixer
         {
             var client = new WebClient();
             client.Headers[HttpRequestHeader.UserAgent] = UserAgent;
-            client.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
             return client;
         }
 
@@ -252,33 +258,5 @@ finally {
             }
         }
 
-        [DataContract]
-        private sealed class GitHubRelease
-        {
-            [DataMember(Name = "tag_name")]
-            public string tag_name { get; set; }
-
-            [DataMember(Name = "html_url")]
-            public string html_url { get; set; }
-
-            [DataMember(Name = "draft")]
-            public bool draft { get; set; }
-
-            [DataMember(Name = "prerelease")]
-            public bool prerelease { get; set; }
-
-            [DataMember(Name = "assets")]
-            public GitHubAsset[] assets { get; set; }
-        }
-
-        [DataContract]
-        private sealed class GitHubAsset
-        {
-            [DataMember(Name = "name")]
-            public string name { get; set; }
-
-            [DataMember(Name = "browser_download_url")]
-            public string browser_download_url { get; set; }
-        }
     }
 }

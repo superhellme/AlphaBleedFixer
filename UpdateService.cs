@@ -5,9 +5,10 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading.Tasks;
-using System.Web.Script.Serialization;
 
 namespace AlphaBleedFixer
 {
@@ -45,8 +46,12 @@ namespace AlphaBleedFixer
                 json = await client.DownloadStringTaskAsync(new Uri(LatestReleaseApiUrl));
             }
 
-            var serializer = new JavaScriptSerializer();
-            var release = serializer.Deserialize<GitHubRelease>(json);
+            GitHubRelease release;
+            var serializer = new DataContractJsonSerializer(typeof(GitHubRelease));
+            using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(json)))
+            {
+                release = (GitHubRelease)serializer.ReadObject(stream);
+            }
             if (release == null || release.draft || release.prerelease || string.IsNullOrWhiteSpace(release.tag_name))
             {
                 return null;
@@ -247,18 +252,32 @@ finally {
             }
         }
 
+        [DataContract]
         private sealed class GitHubRelease
         {
+            [DataMember(Name = "tag_name")]
             public string tag_name { get; set; }
+
+            [DataMember(Name = "html_url")]
             public string html_url { get; set; }
+
+            [DataMember(Name = "draft")]
             public bool draft { get; set; }
+
+            [DataMember(Name = "prerelease")]
             public bool prerelease { get; set; }
+
+            [DataMember(Name = "assets")]
             public GitHubAsset[] assets { get; set; }
         }
 
+        [DataContract]
         private sealed class GitHubAsset
         {
+            [DataMember(Name = "name")]
             public string name { get; set; }
+
+            [DataMember(Name = "browser_download_url")]
             public string browser_download_url { get; set; }
         }
     }
